@@ -1,9 +1,35 @@
 const urlModel = require("../models/urlModel");
-//uniqueId generator
+
 const shortId = require("shortid");
 var validUrl = require("valid-url");
+const redis = require("redis");
 
-//validation checking function
+const { promisify } = require("util");
+
+//Connect to redis
+const redisClient = redis.createClient(
+  14741,
+  "redis-14741.c266.us-east-1-3.ec2.cloud.redislabs.com",
+  { no_ready_check: true }
+);
+redisClient.auth("0UzWGtehIzQmuT07qqsnz1Apio6XXQEW", function (err) {
+  if (err) throw err;
+});
+
+redisClient.on("connect", async function () {
+  console.log("Connected to Redis server..");
+});
+
+//1. connect to the server
+//2. use the commands :
+
+//Connection setup for redis
+
+const SET_ASYNC = promisify(redisClient.SET).bind(redisClient);
+const GET_ASYNC = promisify(redisClient.GET).bind(redisClient);
+
+//********check validation***************/
+
 const isValid = function (value) {
   if (typeof value === "undefined" || value === null) return false;
   if (typeof value === "string" && value.trim().length === 0) return false;
@@ -12,6 +38,8 @@ const isValid = function (value) {
 const isValidRequestBody = function (requestBody) {
   return Object.keys(requestBody).length > 0;
 };
+
+// *********post api create short url*************//
 
 //POST /url/shorten
 
@@ -29,88 +57,47 @@ const urlShortner = async function (req, res) {
           .status(400)
           .send({ status: false, messege: "Please Provide The LongUrl" });
       }
+
       if (!isValid(longUrl)) {
         return res
           .status(400)
           .send({ status: false, messege: "Please Provide The LongUrl" });
       }
       var longUrl = longUrl.trim();
-
-      if (
-        !/(ftp|http|https):\/\/(\w+:{0,1}\w*@)?(\S+)(:[0-9]+)?(\/|\/([\w#!:.?+=&%@!\-/]))?/.test(
-          longUrl
-        )
-      ) {
-        return res
-          .status(400)
-          .send({ status: false, message: `This is not a valid Url` });
-      }
-
-      if (
-        (longUrl.includes("https://") &&
-          longUrl.match(/https:\/\//g).length !== 1) ||
-        (longUrl.includes("http://") &&
-          longUrl.match(/http:\/\//g).length !== 1) ||
-        (longUrl.includes("ftp://") && longUrl.match(/ftp:\/\//g).length !== 1)
-      ) {
-        return res.status(400).send({ status: false, msg: "Url is not valid" });
-      }
-
-      if (!/(.com|.org|.co.in|.in|.co|.us)/.test(longUrl)) {
-        return res.send("Url is not valid");
-      }
-
-      if (
-        longUrl.includes("w") &&
-        (longUrl.indexOf("w") === 6 ||
-          longUrl.indexOf("w") === 7 ||
-          longUrl.indexOf("w") === 8)
-      ) {
-        let arr = [];
-        let i = longUrl.indexOf("w");
-        while (longUrl[i] == "w") {
-          if (longUrl[i] === "w") {
-            arr.push(longUrl[i]);
+let i =/(:?^((https|http|HTTP|HTTPS){1}:\/\/)(([w]{3})[\.]{1})?([a-zA-Z0-9]{1,}[\.])[\w]*((\/){1}([\w@?^=%&amp;~+#-_.]+))*)$/;
+       if (!i.test(longUrl)){
+            return res.status(400).send({ status: false, message: `This is not a valid Url` })
           }
-          i++;
-        }
-
-        if (!(arr.length === 3)) {
-          return res
-            .status(400)
-            .send({ status: false, msg: "Url is not valid " });
-        }
-      }
+    
+          
 
       if (!validUrl.isUri(longUrl)) {
-        return res
-          .status(400)
-          .send({
-            status: false,
-            messege:
-              "The Url Is Not A Valid Url Please Provide The correct Url",
-          });
+        return res.status(400).send({
+          status: false,
+          messege: "The Url Is Not A Valid Url Please Provide The correct Url",
+        });
       }
-
-      //we have to find using long url here
+let cacheData = await GET_ASYNC(`${req.body.longUrl}`);
+if (cacheData) {
+  let x = JSON.parse(cacheData);
+  return res.status(302).send({ status: true, data: x });
+}
       let find = await urlModel
         .findOne({ longUrl: longUrl })
-        .select({ createdAt: 0, updatedAt: 0 });
+        .select({ createdAt: 0, updatedAt: 0, __v: 0, _id: 0});
       if (find) {
+        await SET_ASYNC(`${req.body.longUrl}`, JSON.stringify(find));
         return res.status(200).send({ status: true, data: find });
       } else {
         let generate = shortId.generate();
         let uniqueId = generate.toLowerCase();
 
-        //checking if the code already exists
         let used = await urlModel.findOne({ urlCode: uniqueId });
         if (used) {
-          return res
-            .status(400)
-            .send({
-              status: false,
-              messege: "It seems You Have To Hit The Api Again",
-            });
+          return res.status(400).send({
+            status: false,
+            messege: "It seems You Have To Hit The Api Again",
+          });
         }
 
         let baseurl = "http://localhost:3000";
@@ -136,28 +123,29 @@ const urlShortner = async function (req, res) {
   }
 };
 
-//GET /:urlCode
+//********** get api for redirect url code**************
 
 const geturl = async function (req, res) {
   try {
-    let urlCode = req.params.urlCode;
-    if (!isValid(urlCode)) {
-      return res
-        .status(400)
-        .send({ status: false, messege: "Please Use A Valid Link" });
+    let urlCode = await GET_ASYNC(`${req.params.urlCode}`);
+    if (urlCode) {
+      let data = JSON.parse(urlCode);
+      res.status(200).redirect(data.longUrl);
+      //  console.log(urlCode)
     } else {
-      let findUrl = await urlModel.findOne({ urlCode: urlCode });
-      if (!findUrl) {
-        return res
+      let findUrl = await urlModel.findOne({ urlCode: req.params.urlCode });
+      if (findUrl) {
+        await SET_ASYNC(`${req.params.urlCode}`, JSON.stringify(findUrl));
+        res.status(200).redirect(findUrl.longUrl);
+        console.log(findUrl);
+      } else {
+        res
           .status(400)
           .send({
             status: false,
             messege: "Cant Find What You Are Looking For",
           });
       }
-      let fullUrl = findUrl.longUrl;
-      // return res.status(200).send({status:true,Link:fullUrl});
-      return res.status(302).redirect(fullUrl);
     }
   } catch (error) {
     return res.status(500).send({
